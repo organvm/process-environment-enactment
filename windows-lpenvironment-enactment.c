@@ -79,11 +79,25 @@ static int child_mode(const wchar_t *label) {
   return status;
 }
 
+static int duplicate_standard_handle(DWORD id, HANDLE *duplicate) {
+  HANDLE source = GetStdHandle(id);
+  *duplicate = NULL;
+  if (source == NULL || source == INVALID_HANDLE_VALUE) {
+    SetLastError(ERROR_INVALID_HANDLE);
+    return 0;
+  }
+  return DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), duplicate,
+                         0, TRUE, DUPLICATE_SAME_ACCESS) != 0;
+}
+
 static int run_case(const wchar_t *exe, const wchar_t *label, wchar_t *environment_block) {
   wchar_t command_line[32768];
   STARTUPINFOW startup;
   PROCESS_INFORMATION process;
   DWORD flags = environment_block == NULL ? 0 : CREATE_UNICODE_ENVIRONMENT;
+  HANDLE child_stdin = NULL;
+  HANDLE child_stdout = NULL;
+  HANDLE child_stderr = NULL;
 
   ZeroMemory(&startup, sizeof(startup));
   ZeroMemory(&process, sizeof(process));
@@ -94,7 +108,30 @@ static int run_case(const wchar_t *exe, const wchar_t *label, wchar_t *environme
     return 1;
   }
 
-  if (!CreateProcessW(exe, command_line, NULL, NULL, FALSE, flags, environment_block, NULL, &startup, &process)) {
+  if (!duplicate_standard_handle(STD_INPUT_HANDLE, &child_stdin) ||
+      !duplicate_standard_handle(STD_OUTPUT_HANDLE, &child_stdout) ||
+      !duplicate_standard_handle(STD_ERROR_HANDLE, &child_stderr)) {
+    DWORD code = GetLastError();
+    if (child_stdin != NULL) CloseHandle(child_stdin);
+    if (child_stdout != NULL) CloseHandle(child_stdout);
+    if (child_stderr != NULL) CloseHandle(child_stderr);
+    SetLastError(code);
+    return print_last_error(L"DuplicateHandle");
+  }
+
+  startup.dwFlags = STARTF_USESTDHANDLES;
+  startup.hStdInput = child_stdin;
+  startup.hStdOutput = child_stdout;
+  startup.hStdError = child_stderr;
+
+  BOOL created = CreateProcessW(exe, command_line, NULL, NULL, TRUE, flags,
+                                environment_block, NULL, &startup, &process);
+  DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(child_stdin);
+  CloseHandle(child_stdout);
+  CloseHandle(child_stderr);
+  if (!created) {
+    SetLastError(create_error);
     return print_last_error(L"CreateProcessW");
   }
 
